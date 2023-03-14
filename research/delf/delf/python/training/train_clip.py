@@ -34,8 +34,8 @@ import tensorflow_probability as tfp
 
 # Placeholder for internal import. Do not remove this line.
 from delf.python.datasets.google_landmarks_dataset import googlelandmarks as gld
-from delf.python.training.model import delf_model
-from delf.python.training.model import delg_model
+from delf.python.training.model import delf_clip_model
+from delf.python.training.model import delg_clip_model
 
 FLAGS = flags.FLAGS
 
@@ -85,6 +85,15 @@ flags.DEFINE_float(
     'reconstruction_loss_weight', 10.0,
     'Weight to apply to the reconstruction loss from the autoencoder when'
     'calculating total loss of the model. Used only if use_autoencoder=True.')
+flags.DEFINE_boolean('text_trainable', False,
+                     'Whether to train the linear text classifier.')
+flags.DEFINE_float(
+    'text_loss_weight', 1.0, 'Weight to apply to the text loss.')
+flags.DEFINE_float(
+    'text_scale', 1.0, 'The scale factor of the text cosine logits.')
+flags.DEFINE_string('text_weight_ckpt',
+                    '/home/taihong/work/retrieval/CLIP-tf2/models/linear_weights/text_weight.npy',
+                    'Text weight file.')
 flags.DEFINE_float(
     'autoencoder_dimensions', 128,
     'Number of dimensions of the autoencoder. Used only if'
@@ -128,7 +137,7 @@ def _attention_summaries(scores, global_step):
 def create_model(num_classes):
   """Define DELF model, and initialize classifiers."""
   if FLAGS.delg_global_features:
-    model = delg_model.Delg(
+    model = delg_clip_model.Delg(
         block3_strides=FLAGS.block3_strides,
         name='DELG',
         gem_power=FLAGS.delg_gem_power,
@@ -137,9 +146,13 @@ def create_model(num_classes):
         arcface_margin=FLAGS.delg_arcface_margin,
         use_dim_reduction=FLAGS.use_autoencoder,
         reduced_dimension=FLAGS.autoencoder_dimensions,
-        dim_expand_channels=FLAGS.local_feature_map_channels)
+        dim_expand_channels=FLAGS.local_feature_map_channels,
+        text_trainable=FLAGS.text_trainable,
+        text_scale=FLAGS.text_scale,
+        text_weight_ckpt=FLAGS.text_weight_ckpt,
+    )
   else:
-    model = delf_model.Delf(
+    model = delf_clip_model.Delf(
         block3_strides=FLAGS.block3_strides,
         name='DELF',
         use_dim_reduction=FLAGS.use_autoencoder,
@@ -229,7 +242,7 @@ def main(argv):
   validation_iter = iter(validation_dist_dataset)
 
   # Create a checkpoint directory to store the checkpoints.
-  checkpoint_prefix = os.path.join(FLAGS.logdir, 'delf_tf2-ckpt')
+  checkpoint_prefix = os.path.join(FLAGS.logdir, 'delg_clip_tf2-ckpt')
 
   # ------------------------------------------------------------
   # Finally, we do everything in distributed scope.
@@ -248,12 +261,17 @@ def main(argv):
     # Set up metrics.
     desc_validation_loss = tf.keras.metrics.Mean(name='desc_validation_loss')
     attn_validation_loss = tf.keras.metrics.Mean(name='attn_validation_loss')
+    text_validation_loss = tf.keras.metrics.Mean(name='text_validation_loss')
     desc_train_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(
         name='desc_train_accuracy')
+    text_train_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(
+        name='text_train_accuracy')
     attn_train_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(
         name='attn_train_accuracy')
     desc_validation_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(
         name='desc_validation_accuracy')
+    text_validation_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(
+        name='text_validation_accuracy')
     attn_validation_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(
         name='attn_validation_accuracy')
 
@@ -301,7 +319,7 @@ def main(argv):
       # Record gradients and loss through backbone.
       with tf.GradientTape() as gradient_tape:
         # Make a forward pass to calculate prelogits.
-        (desc_prelogits, attn_prelogits, attn_scores, backbone_blocks,
+        (desc_prelogits, text_prelogits, attn_prelogits, attn_scores, backbone_blocks,
          dim_expanded_features, _) = model.global_and_local_forward_pass(images)
 
         # Calculate global loss by applying the descriptor classifier.
@@ -310,6 +328,9 @@ def main(argv):
         else:
           desc_logits = model.desc_classification(desc_prelogits)
         desc_loss = compute_loss(labels, desc_logits)
+
+        text_logits = model.text_classification(text_prelogits)
+        text_loss = compute_loss(labels, text_logits)
 
         # Calculate attention loss by applying the attention block classifier.
         attn_logits = model.attn_classification(attn_prelogits)
@@ -327,7 +348,9 @@ def main(argv):
         # Cumulate global loss, attention loss and reconstruction loss.
         total_loss = (
             desc_loss + FLAGS.attention_loss_weight * attn_loss +
-            FLAGS.reconstruction_loss_weight * reconstruction_loss)
+            FLAGS.reconstruction_loss_weight * reconstruction_loss +
+            FLAGS.text_loss_weight * text_loss
+        )
 
       # Perform backpropagation through the descriptor and attention layers
       # together. Note that this will increment the number of iterations of
@@ -360,9 +383,10 @@ def main(argv):
 
       # Record train accuracies.
       _record_accuracy(desc_train_accuracy, desc_logits, labels)
+      _record_accuracy(text_train_accuracy, text_logits, labels)
       _record_accuracy(attn_train_accuracy, attn_logits, labels)
 
-      return desc_loss, attn_loss, reconstruction_loss
+      return desc_loss, text_loss, attn_loss, reconstruction_loss
 
     # ------------------------------------------------------------
     def validation_step(inputs):
@@ -378,11 +402,20 @@ def main(argv):
         logits = model.desc_classification(prelogits, labels, training=False)
       else:
         logits = model.desc_classification(prelogits, training=False)
+
       softmax_probabilities = tf.keras.layers.Softmax()(logits)
 
       validation_loss = loss_object(labels, logits)
       desc_validation_loss.update_state(validation_loss)
       desc_validation_accuracy.update_state(labels, softmax_probabilities)
+
+      text_prelogits = model.adapter(prelogits)
+      text_logits = model.text_classification(text_prelogits)
+      text_softmax_probabilities = tf.keras.layers.Softmax()(text_logits)
+
+      validation_loss = loss_object(labels, text_logits)
+      text_validation_loss.update_state(validation_loss)
+      text_validation_accuracy.update_state(labels, text_softmax_probabilities)
 
       # Get attention predictions.
       block3 = blocks['block3']  # pytype: disable=key-error
@@ -395,8 +428,8 @@ def main(argv):
       attn_validation_loss.update_state(validation_loss)
       attn_validation_accuracy.update_state(labels, softmax_probabilities)
 
-      return desc_validation_accuracy.result(), attn_validation_accuracy.result(
-      )
+      return desc_validation_accuracy.result(), text_validation_accuracy.result(
+      ), attn_validation_accuracy.result()
 
     # `run` replicates the provided computation and runs it
     # with the distributed input.
@@ -404,18 +437,22 @@ def main(argv):
     def distributed_train_step(dataset_inputs):
       """Get the actual losses."""
       # Each (desc, attn) is a list of 3 losses - crossentropy, reg, total.
-      desc_per_replica_loss, attn_per_replica_loss, recon_per_replica_loss = (
-          strategy.run(train_step, args=(dataset_inputs,)))
+      (desc_per_replica_loss, text_per_replica_loss, attn_per_replica_loss,
+       recon_per_replica_loss) = strategy.run(
+           train_step, args=(dataset_inputs,))
 
       # Reduce over the replicas.
       desc_global_loss = strategy.reduce(
           tf.distribute.ReduceOp.SUM, desc_per_replica_loss, axis=None)
+      text_global_loss = strategy.reduce(
+          tf.distribute.ReduceOp.SUM, text_per_replica_loss, axis=None)
       attn_global_loss = strategy.reduce(
           tf.distribute.ReduceOp.SUM, attn_per_replica_loss, axis=None)
       recon_global_loss = strategy.reduce(
           tf.distribute.ReduceOp.SUM, recon_per_replica_loss, axis=None)
 
-      return desc_global_loss, attn_global_loss, recon_global_loss
+      return (desc_global_loss, text_global_loss, attn_global_loss,
+              recon_global_loss)
 
     @tf.function
     def distributed_validation_step(dataset_inputs):
@@ -433,11 +470,12 @@ def main(argv):
         if (FLAGS.imagenet_checkpoint is not None) and (not global_step_value):
           logging.info('Attempting to load ImageNet pretrained weights.')
           input_batch = next(train_iter)
-          _, _, _ = distributed_train_step(input_batch)
+          _ = distributed_train_step(input_batch)
           model.backbone.restore_weights(FLAGS.imagenet_checkpoint)
           logging.info('Done.')
         else:
           logging.info('Skip loading ImageNet pretrained weights.')
+
         if FLAGS.debug:
           model.backbone.log_weights()
 
@@ -456,7 +494,7 @@ def main(argv):
           # Set learning rate and run the training step over num_gpu gpus.
           optimizer.learning_rate = _learning_rate_schedule(
               optimizer.iterations.numpy(), max_iters, initial_lr)
-          desc_dist_loss, attn_dist_loss, recon_dist_loss = (
+          desc_dist_loss, text_dist_loss, attn_dist_loss, recon_dist_loss = (
               distributed_train_step(input_batch))
 
           # Step number, to be used for summary/logging.
@@ -469,6 +507,8 @@ def main(argv):
           tf.summary.scalar(
               'loss/desc/crossentropy', desc_dist_loss, step=global_step)
           tf.summary.scalar(
+              'loss/text/crossentropy', text_dist_loss, step=global_step)
+          tf.summary.scalar(
               'loss/attn/crossentropy', attn_dist_loss, step=global_step)
           if FLAGS.use_autoencoder:
             tf.summary.scalar(
@@ -477,6 +517,10 @@ def main(argv):
           tf.summary.scalar(
               'train_accuracy/desc',
               desc_train_accuracy.result(),
+              step=global_step)
+          tf.summary.scalar(
+              'train_accuracy/text',
+              text_train_accuracy.result(),
               step=global_step)
           tf.summary.scalar(
               'train_accuracy/attn',
@@ -501,6 +545,7 @@ def main(argv):
             if global_step_value % report_interval == 0:
               print(global_step.numpy())
               print('desc:', desc_dist_loss.numpy())
+              print('text:', text_dist_loss.numpy())
               print('attn:', attn_dist_loss.numpy())
 
           # Validate once in {eval_interval*n, n \in N} steps.
@@ -508,7 +553,8 @@ def main(argv):
             for i in range(num_eval_batches):
               try:
                 validation_batch = next(validation_iter)
-                desc_validation_result, attn_validation_result = (
+                (desc_validation_result, text_validation_result,
+                 attn_validation_result) = (
                     distributed_validation_step(validation_batch))
               except tf.errors.OutOfRangeError:
                 logging.info('Stopping eval at batch %d, no more data', i)
@@ -518,14 +564,18 @@ def main(argv):
             tf.summary.scalar(
                 'validation/desc', desc_validation_result, step=global_step)
             tf.summary.scalar(
+                'validation/text', text_validation_result, step=global_step)
+            tf.summary.scalar(
                 'validation/attn', attn_validation_result, step=global_step)
 
             logging.info('\nValidation(%f)\n', global_step_value)
             logging.info(': desc: %f\n', desc_validation_result.numpy())
+            logging.info(': text: %f\n', text_validation_result.numpy())
             logging.info(': attn: %f\n', attn_validation_result.numpy())
             # Print to console.
             if FLAGS.debug:
               print('Validation: desc:', desc_validation_result.numpy())
+              print('          : text:', text_validation_result.numpy())
               print('          : attn:', attn_validation_result.numpy())
 
           # Save checkpoint once (each save_interval*n, n \in N) steps, or if
@@ -538,17 +588,20 @@ def main(argv):
             save_path = manager.save(checkpoint_number=global_step_value)
             logging.info('Saved (%d) at %s', global_step_value, save_path)
 
-            file_path = '%s/delf_weights' % FLAGS.logdir
+            file_path = '%s/delg_clip_weights' % FLAGS.logdir
             model.save_weights(file_path, save_format='tf')
             logging.info('Saved weights (%d) at %s', global_step_value,
                          file_path)
 
           # Reset metrics for next step.
           desc_train_accuracy.reset_states()
+          text_train_accuracy.reset_states()
           attn_train_accuracy.reset_states()
           desc_validation_loss.reset_states()
+          text_validation_loss.reset_states()
           attn_validation_loss.reset_states()
           desc_validation_accuracy.reset_states()
+          text_validation_accuracy.reset_states()
           attn_validation_accuracy.reset_states()
 
     logging.info('Finished training for %d steps.', max_iters)

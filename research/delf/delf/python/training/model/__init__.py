@@ -22,4 +22,5 @@ from delf.python.training.model import delf_model
 from delf.python.training.model import delg_model
 from delf.python.training.model import export_model_utils
 from delf.python.training.model import resnet50
+from delf.python.training.model import resnet_clip
 # pylint: enable=unused-import
