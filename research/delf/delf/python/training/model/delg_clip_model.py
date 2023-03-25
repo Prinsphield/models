@@ -51,6 +51,7 @@ class Delg(delf_clip_model.Delf):
                use_dim_reduction=False,
                reduced_dimension=128,
                dim_expand_channels=1024,
+               use_clip_backbone=True,
                text_trainable=False,
                text_scale=1.,
                text_weight_ckpt=''):
@@ -85,7 +86,8 @@ class Delg(delf_clip_model.Delf):
                                embedding_layer_dim=embedding_layer_dim,
                                use_dim_reduction=use_dim_reduction,
                                reduced_dimension=reduced_dimension,
-                               dim_expand_channels=dim_expand_channels)
+                               dim_expand_channels=dim_expand_channels,
+                               use_clip_backbone=use_clip_backbone)
     self._embedding_layer_dim = embedding_layer_dim
     self._scale_factor_init = scale_factor_init
     self._arcface_margin = arcface_margin

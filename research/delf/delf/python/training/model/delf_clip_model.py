@@ -21,7 +21,8 @@
 
 import tensorflow as tf
 
-from delf.python.training.model import resnet_clip as resnet
+from delf.python.training.model.resnet_clip import ModifiedResNet
+from delf.python.training.model.resnet50 import ResNet50
 
 layers = tf.keras.layers
 reg = tf.keras.regularizers
@@ -154,7 +155,8 @@ class Delf(tf.keras.Model):
                embedding_layer_dim=2048,
                use_dim_reduction=False,
                reduced_dimension=128,
-               dim_expand_channels=1024):
+               dim_expand_channels=1024,
+               use_clip_backbone=True):
     """Initialization of DELF model.
 
     Args:
@@ -178,13 +180,24 @@ class Delf(tf.keras.Model):
     """
     super(Delf, self).__init__(name=name)
 
-    # Backbone using Keras ResNet50.
-    self.backbone = resnet.ModifiedResNet(
-        name='backbone',
-        pooling=pooling,
-        gem_power=gem_power,
-        embedding_layer=embedding_layer,
-        output_dim=embedding_layer_dim)
+    if use_clip_backbone:
+        self.backbone = ModifiedResNet(
+            name='backbone',
+            pooling=pooling,
+            gem_power=gem_power,
+            embedding_layer=embedding_layer,
+            output_dim=embedding_layer_dim)
+    else:
+        self.backbone = ResNet50(
+            'channels_last',
+            name='backbone',
+            include_top=False,
+            pooling=pooling,
+            block3_strides=block3_strides,
+            average_pooling=False,
+            gem_power=gem_power,
+            embedding_layer=embedding_layer,
+            embedding_layer_dim=embedding_layer_dim)
 
     # Attention model.
     self.attention = AttentionModel(name='attention')

@@ -94,8 +94,6 @@ flags.DEFINE_float(
 flags.DEFINE_string('text_weight_ckpt',
                     '/home/taihong/work/retrieval/CLIP-tf2/models/linear_weights/text_weight.npy',
                     'Text weight file.')
-flags.DEFINE_boolean('use_clip_backbone', True,
-                     'Whether to use the pretrained clip backbone.')
 flags.DEFINE_float(
     'autoencoder_dimensions', 128,
     'Number of dimensions of the autoencoder. Used only if'
@@ -149,7 +147,6 @@ def create_model(num_classes):
         use_dim_reduction=FLAGS.use_autoencoder,
         reduced_dimension=FLAGS.autoencoder_dimensions,
         dim_expand_channels=FLAGS.local_feature_map_channels,
-        use_clip_backbone=FLAGS.use_clip_backbone,
         text_trainable=FLAGS.text_trainable,
         text_scale=FLAGS.text_scale,
         text_weight_ckpt=FLAGS.text_weight_ckpt,
